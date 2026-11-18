@@ -140,6 +140,7 @@ final class PortpeekCoreTests: XCTestCase {
         XCTAssertEqual(entry.hosts, ["127.0.0.1"])
         XCTAssertTrue(entry.isLocalOnly)
         XCTAssertNotNil(entry.executable)
+        XCTAssertNotNil(entry.uptime)
         XCTAssertTrue(ProcessControl.isRunning(entry.pid))
     }
 }

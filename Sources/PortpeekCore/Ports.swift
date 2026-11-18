@@ -11,11 +11,18 @@ public struct PortEntry: Identifiable, Equatable, Sendable {
     public var hosts: [String]
     public var executable: String?
     public var directory: String?
+    /// The app it was started from, found by walking up the parent processes.
+    public var origin: Origin?
+    /// The controlling terminal, which is how a terminal tab is matched to the process.
+    public var tty: String?
+    /// Seconds the process has been running.
+    public var uptime: TimeInterval?
 
     public var id: String { "\(pid):\(port)" }
 
     public init(port: Int, pid: Int32, process: String, user: String = "", hosts: [String] = [],
-                executable: String? = nil, directory: String? = nil) {
+                executable: String? = nil, directory: String? = nil,
+                origin: Origin? = nil, tty: String? = nil, uptime: TimeInterval? = nil) {
         self.port = port
         self.pid = pid
         self.process = process
@@ -23,6 +30,9 @@ public struct PortEntry: Identifiable, Equatable, Sendable {
         self.hosts = hosts
         self.executable = executable
         self.directory = directory
+        self.origin = origin
+        self.tty = tty
+        self.uptime = uptime
     }
 
     /// The folder the process was started in, which for a dev server is the project.
@@ -45,6 +55,17 @@ public struct PortEntry: Identifiable, Equatable, Sendable {
             return String(component.dropLast(4))
         }
         return nil
+    }
+
+    /// Where it was started from, when that says more than the name already does.
+    public var startedFrom: Origin? {
+        guard let origin, !origin.isOwnApp else { return nil }
+        return origin
+    }
+
+    /// "localhost:3000", for pasting into a config file or an address bar.
+    public var address: String {
+        "localhost:\(port)"
     }
 
     /// What to call it in a list.
@@ -78,17 +99,32 @@ public struct PortEntry: Identifiable, Equatable, Sendable {
 public enum PortScanner {
     /// Everything listening on TCP that this user can see, sorted by port.
     public static func scan() -> [PortEntry] {
-        var entries = parseListeners(run("/usr/sbin/lsof", ["-nP", "+c", "0", "-iTCP", "-sTCP:LISTEN", "-F", "pcLn"]))
+        let entries = parseListeners(run("/usr/sbin/lsof", ["-nP", "+c", "0", "-iTCP", "-sTCP:LISTEN", "-F", "pcLn"]))
         guard !entries.isEmpty else { return [] }
 
         let pids = Set(entries.map(\.pid)).map(String.init).joined(separator: ",")
         let directories = parseDirectories(run("/usr/sbin/lsof", ["-a", "-d", "cwd", "-F", "pn", "-p", pids]))
-        let executables = parseProcesses(run("/bin/ps", ["-ww", "-o", "pid=,comm=", "-p", pids]))
-        for index in entries.indices {
-            entries[index].directory = directories[entries[index].pid]
-            entries[index].executable = executables[entries[index].pid]
+        // Every process, once: the parents are needed to find out where each server was started from.
+        let table = ProcessTable.parse(run("/bin/ps", ["-axww", "-o", "pid=,ppid=,tty=,etime=,comm="]))
+        return attach(table, directories: directories, to: entries)
+    }
+
+    /// Fills in what the process table and the working directories know about each listener.
+    public static func attach(_ table: [Int32: ProcessRecord], directories: [Int32: String], to entries: [PortEntry]) -> [PortEntry] {
+        var origins: [Int32: Origin] = [:]
+        var walked: Set<Int32> = []
+        return entries.map { entry in
+            var entry = entry
+            let record = table[entry.pid]
+            entry.directory = directories[entry.pid]
+            entry.executable = record?.executable
+            entry.tty = record?.tty
+            entry.uptime = record?.elapsed
+            // A process with several ports is only walked once.
+            if walked.insert(entry.pid).inserted { origins[entry.pid] = ProcessTable.origin(of: entry.pid, in: table) }
+            entry.origin = origins[entry.pid]
+            return entry
         }
-        return entries
     }
 
     /// Reads `lsof -F pcLn` output: one `p` block per process, with an `n` line per listening socket.

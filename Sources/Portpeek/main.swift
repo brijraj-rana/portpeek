@@ -15,8 +15,12 @@ final class PortsModel: ObservableObject {
         didSet { UserDefaults.standard.set(showBackground, forKey: "showBackground") }
     }
 
+    /// The row under the pointer, so a right-click knows which port it is about.
+    private(set) var hovered: PortEntry?
+
     private var scanning = false
     private var rescan = false
+    private var focusing = false
 
     init() {
         showBackground = UserDefaults.standard.bool(forKey: "showBackground")
@@ -24,6 +28,11 @@ final class PortsModel: ObservableObject {
 
     var visible: [PortEntry] {
         showBackground ? entries : entries.filter { !$0.isBackground }
+    }
+
+    /// How tall the list wants to be, projects and their headings included.
+    var contentHeight: CGFloat {
+        Metrics.contentHeight(Projects.sections(visible))
     }
 
     var backgroundCount: Int {
@@ -62,9 +71,60 @@ final class PortsModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    func hover(_ entry: PortEntry, _ inside: Bool) {
+        if inside {
+            hovered = entry
+        } else if hovered?.id == entry.id {
+            hovered = nil
+        }
+    }
+
+    func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// Brings the app the server was started from to the front and, for Terminal and iTerm2, the tab it is running in.
+    func showOrigin(of entry: PortEntry) {
+        guard let origin = entry.startedFrom, origin.canActivate else { return }
+        let app = origin.pid.flatMap { NSRunningApplication(processIdentifier: $0) }
+            ?? origin.bundleIdentifier.flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first }
+        guard let app else { return }
+        if !app.activate(options: [.activateAllWindows]), let url = app.bundleURL {
+            NSWorkspace.shared.open(url)
+        }
+
+        // The tab is a nicety on top. It needs Automation permission, which macOS asks for the first time;
+        // if the answer is no, the app has still come forward and nothing else happens.
+        guard !focusing, let kind = origin.terminalScripting,
+              let script = TerminalFocus.script(for: kind, tty: entry.tty) else { return }
+        focusing = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            task.arguments = ["-e", script]
+            task.standardOutput = FileHandle.nullDevice
+            task.standardError = FileHandle.nullDevice
+            if (try? task.run()) != nil { task.waitUntilExit() }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self.focusing = false }
+            }
+        }
+    }
+
     func stop(_ entry: PortEntry) {
-        let pid = entry.pid
-        guard ProcessControl.stop(pid, force: stubborn.contains(pid)) else {
+        signal(entry.pid, force: stubborn.contains(entry.pid))
+    }
+
+    /// Asks every process in a project to quit. Any that ignore it get a Force button on their own row, as usual.
+    func stopAll(_ group: ProjectGroup) {
+        for pid in Projects.stopTargets(directory: group.directory, in: entries) where !stopping.contains(pid) {
+            signal(pid, force: false)
+        }
+    }
+
+    private func signal(_ pid: Int32, force: Bool) {
+        guard ProcessControl.stop(pid, force: force) else {
             refresh()
             return
         }
@@ -194,7 +254,7 @@ final class CornerController: NSObject {
         activeScreen = screen
         let corner = state.corner
         let area = screen.visibleFrame
-        let height = Metrics.height(rows: model.visible.count, hint: state.hint)
+        let height = Metrics.height(content: model.contentHeight, hint: state.hint)
         let x = corner.isLeft ? area.minX + Metrics.inset : area.maxX - Metrics.inset - Metrics.width
         let y = corner.isTop ? area.maxY - Metrics.inset - height : area.minY + Metrics.inset
         panelRect = NSRect(x: x, y: y, width: Metrics.width, height: height)
@@ -273,7 +333,7 @@ final class CornerController: NSObject {
         if ticks % 10 == 0 { model.refresh() }     // every two seconds while open, never while closed
         if let screen = activeScreen {
             // The list may have grown or shrunk; keep the hit area matched to what is drawn.
-            let height = Metrics.height(rows: model.visible.count, hint: state.hint)
+            let height = Metrics.height(content: model.contentHeight, hint: state.hint)
             if abs(height - panelRect.height) > 0.5 { place(on: screen) }
         }
         pointerMoved()
@@ -284,6 +344,27 @@ final class CornerController: NSObject {
     private func showMenu(at event: NSEvent?) {
         guard let view = panel.contentView else { return }
         let menu = NSMenu()
+
+        // Over a row, the menu starts with that port.
+        if event != nil, let entry = model.hovered, model.visible.contains(where: { $0.id == entry.id }) {
+            let address = NSMenuItem(title: "Copy \(entry.address)", action: #selector(copyText(_:)), keyEquivalent: "")
+            address.target = self
+            address.representedObject = entry.address
+            menu.addItem(address)
+            if let url = entry.url {
+                let link = NSMenuItem(title: "Copy \(url.absoluteString)", action: #selector(copyText(_:)), keyEquivalent: "")
+                link.target = self
+                link.representedObject = url.absoluteString
+                menu.addItem(link)
+            }
+            // How long it has been up has no room on the row, so it is said here.
+            if let uptime = Uptime.phrase(entry.uptime) {
+                let item = NSMenuItem(title: uptime, action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+        }
 
         let cornerItem = NSMenuItem(title: "Corner", action: nil, keyEquivalent: "")
         let corners = NSMenu()
@@ -335,6 +416,10 @@ final class CornerController: NSObject {
         }
     }
 
+    @objc private func copyText(_ sender: NSMenuItem) {
+        if let text = sender.representedObject as? String { model.copy(text) }
+    }
+
     @objc private func toggleBackground() {
         model.showBackground.toggle()
     }
@@ -373,7 +458,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return args[i + 1]
         }
         if let directory = value(after: "--snapshot") {
-            Snapshot.render(to: directory, scale: value(after: "--scale").flatMap(Double.init).map { CGFloat($0) } ?? 2)
+            Snapshot.render(to: directory, scale: value(after: "--scale").flatMap(Double.init).map { CGFloat($0) } ?? 2,
+                            checks: args.contains("--checks"))
         } else {
             controller.start()
         }

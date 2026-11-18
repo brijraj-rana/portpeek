@@ -45,19 +45,35 @@ enum Metrics {
     static let footer: CGFloat = 34
     static let empty: CGFloat = 74
     static let hint: CGFloat = 46
+    static let heading: CGFloat = 30      // a project's name above its ports
+    static let groupGap: CGFloat = 4       // air above and below a project
+    static let groupInset: CGFloat = 6     // a project sits this far in from the panel's edges
+    static let padding: CGFloat = 14       // the panel's left and right padding
     static let maxRows = 8
     static let margin: CGFloat = 36        // room for the shadow
     static let inset: CGFloat = 6          // gap between the panel and the screen edge
 
-    static func listHeight(rows: Int) -> CGFloat {
-        rows == 0 ? empty : CGFloat(min(rows, maxRows)) * row
+    static let maxList = CGFloat(maxRows) * row
+
+    /// What the list would measure with nothing cut off.
+    static func contentHeight(_ sections: [PortSection]) -> CGFloat {
+        sections.reduce(0) { total, section in
+            switch section {
+            case .row: return total + row
+            case .project(let group): return total + heading + CGFloat(group.entries.count) * row + groupGap * 2
+            }
+        }
     }
 
-    static func height(rows: Int, hint: Bool) -> CGFloat {
-        header + listHeight(rows: rows) + footer + (hint ? Metrics.hint : 0) + 2
+    static func listHeight(content: CGFloat) -> CGFloat {
+        content == 0 ? empty : min(content, maxList)
     }
 
-    static let maxHeight = height(rows: maxRows, hint: true)
+    static func height(content: CGFloat, hint: Bool) -> CGFloat {
+        header + listHeight(content: content) + footer + (hint ? Metrics.hint : 0) + 2
+    }
+
+    static let maxHeight = height(content: maxList, hint: true)
     static let windowSize = CGSize(width: width + margin * 2, height: maxHeight + margin * 2)
 }
 
@@ -70,6 +86,13 @@ final class PanelState: ObservableObject {
 enum Tone {
     static let danger = Color(red: 1.00, green: 0.36, blue: 0.33)
     static let live = Color(red: 0.42, green: 0.90, blue: 0.62)
+}
+
+enum Motion {
+    /// For small changes of state under the pointer. Nothing moves when Reduce Motion is on.
+    static func quick(_ reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .timingCurve(0.22, 1, 0.36, 1, duration: 0.15)
+    }
 }
 
 private struct SnapshotKey: EnvironmentKey {
@@ -127,18 +150,22 @@ struct PortRow: View {
     let entry: PortEntry
     let stopping: Bool
     let stubborn: Bool
+    var grouped = false                    // under a project heading, which already names the folder
     let onOpen: () -> Void
     let onStop: () -> Void
+    var onOrigin: () -> Void = {}
+    var onHover: (Bool) -> Void = { _ in }
     @State private var hovering = false
     @Environment(\.isSnapshot) private var isSnapshot
 
     private var detail: String {
         var parts: [String] = []
-        if let project = entry.project { parts.append(project) }
+        if !grouped, let project = entry.project { parts.append(project) }
         if entry.appName != nil, entry.process != entry.displayName { parts.append(entry.process) }
         parts.append("pid \(entry.pid)")
         return parts.joined(separator: " · ")
     }
+
 
     var body: some View {
         HStack(spacing: 10) {
@@ -148,10 +175,17 @@ struct PortRow: View {
                 .frame(width: 52, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(entry.displayName)
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.92))
-                    .lineLimit(1)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(entry.displayName)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .lineLimit(1)
+                    if let origin = entry.startedFrom {
+                        // Kept whole: a long process name gives way before this does.
+                        OriginLabel(origin: origin, action: onOrigin)
+                            .layoutPriority(1)
+                    }
+                }
                 Text(detail)
                     .font(.system(size: 10.5, weight: .medium).monospacedDigit())
                     .foregroundStyle(.white.opacity(0.45))
@@ -189,15 +223,95 @@ struct PortRow: View {
                 .accessibilityLabel("\(stubborn ? "Force quit" : "Quit") \(entry.displayName) on port \(entry.port)")
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, grouped ? Metrics.padding - Metrics.groupInset : Metrics.padding)
         .frame(height: Metrics.row)
         .background {
             ZStack {
                 Color.white.opacity(hovering ? 0.07 : 0)
-                if !isSnapshot { HoverSensor { hovering = $0 } }
+                if !isSnapshot {
+                    HoverSensor {
+                        hovering = $0
+                        onHover($0)
+                    }
+                }
             }
         }
         .opacity(stopping ? 0.55 : 1)
+    }
+}
+
+/// "from Cursor": where the server was started. Clicking it brings that app forward.
+struct OriginLabel: View {
+    let origin: Origin
+    let action: () -> Void
+    @State private var hovering = false
+    @Environment(\.isSnapshot) private var isSnapshot
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var text: some View {
+        Text(origin.label)
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(.white.opacity(hovering ? 0.9 : 0.45))
+            .lineLimit(1)
+            .frame(maxWidth: 96, alignment: .leading)
+            .fixedSize()
+    }
+
+    var body: some View {
+        if origin.canActivate {
+            Button(action: action) {
+                text
+                    .contentShape(Rectangle())
+                    .background { if !isSnapshot { HoverSensor { hovering = $0 } } }
+            }
+            .buttonStyle(.plain)
+            .animation(Motion.quick(reduceMotion), value: hovering)
+            .accessibilityLabel("Started from \(origin.name). Bring it forward")
+        } else {
+            text
+        }
+    }
+}
+
+/// The name of a project above its ports, with one button to stop them all.
+struct ProjectHeading: View {
+    let group: ProjectGroup
+    let stopping: Bool
+    let onStopAll: () -> Void
+    @State private var hovering = false
+    @Environment(\.isSnapshot) private var isSnapshot
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(group.name)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 6)
+
+            if stopping {
+                Text("Stopping")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.45))
+            } else {
+                Button(action: onStopAll) {
+                    Text("Stop all")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(hovering ? Tone.danger : .white.opacity(0.6))
+                        .padding(.horizontal, 9)
+                        .frame(height: 20)
+                        .background(Capsule().fill(hovering ? Tone.danger.opacity(0.18) : .white.opacity(0.1)))
+                        .background { if !isSnapshot { HoverSensor { hovering = $0 } } }
+                }
+                .buttonStyle(.plain)
+                .animation(Motion.quick(reduceMotion), value: hovering)
+                .accessibilityLabel("Stop every port in \(group.name)")
+            }
+        }
+        .padding(.horizontal, Metrics.padding - Metrics.groupInset)
+        .frame(height: Metrics.heading)
     }
 }
 
@@ -211,6 +325,8 @@ struct PanelView: View {
 
     var body: some View {
         let rows = model.visible
+        let sections = Projects.sections(rows)
+        let content = Metrics.contentHeight(sections)
         VStack(spacing: 0) {
             header(count: rows.count)
             hairline
@@ -220,11 +336,11 @@ struct PanelView: View {
                     .foregroundStyle(.white.opacity(0.5))
                     .frame(maxWidth: .infinity)
                     .frame(height: Metrics.empty)
-            } else if rows.count > Metrics.maxRows, !isSnapshot {
-                ScrollView(.vertical, showsIndicators: false) { list(rows) }
-                    .frame(height: Metrics.listHeight(rows: rows.count))
+            } else if content > Metrics.maxList, !isSnapshot {
+                ScrollView(.vertical, showsIndicators: false) { list(sections) }
+                    .frame(height: Metrics.listHeight(content: content))
             } else {
-                list(rows)
+                list(sections)
             }
             hairline
             footer
@@ -269,16 +385,39 @@ struct PanelView: View {
         .frame(height: Metrics.header)
     }
 
-    private func list(_ rows: [PortEntry]) -> some View {
+    private func list(_ sections: [PortSection]) -> some View {
         VStack(spacing: 0) {
-            ForEach(rows) { entry in
-                PortRow(entry: entry,
-                        stopping: model.stopping.contains(entry.pid),
-                        stubborn: model.stubborn.contains(entry.pid),
-                        onOpen: { model.open(entry) },
-                        onStop: { model.stop(entry) })
+            ForEach(sections) { section in
+                switch section {
+                case .row(let entry):
+                    row(entry, grouped: false)
+                case .project(let group):
+                    VStack(spacing: 0) {
+                        ProjectHeading(group: group,
+                                       stopping: group.entries.allSatisfy { model.stopping.contains($0.pid) },
+                                       onStopAll: { model.stopAll(group) })
+                        ForEach(group.entries) { entry in
+                            row(entry, grouped: true)
+                        }
+                    }
+                    .background(.white.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .padding(.horizontal, Metrics.groupInset)
+                    .padding(.vertical, Metrics.groupGap)
+                }
             }
         }
+    }
+
+    private func row(_ entry: PortEntry, grouped: Bool) -> some View {
+        PortRow(entry: entry,
+                stopping: model.stopping.contains(entry.pid),
+                stubborn: model.stubborn.contains(entry.pid),
+                grouped: grouped,
+                onOpen: { model.open(entry) },
+                onStop: { model.stop(entry) },
+                onOrigin: { model.showOrigin(of: entry) },
+                onHover: { model.hover(entry, $0) })
     }
 
     private var footer: some View {

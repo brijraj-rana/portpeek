@@ -5,34 +5,72 @@ import SwiftUI
 /// Development aid: renders the panel to PNGs with made-up ports, so README images never show a real machine.
 @MainActor
 enum Snapshot {
-    static func render(to directory: String, scale: CGFloat) {
+    static func render(to directory: String, scale: CGFloat, checks: Bool = false) {
+        let cursor = Origin(name: "Cursor", kind: .editor)
+        let terminal = Origin(name: "Terminal", kind: .terminal, bundleIdentifier: "com.apple.Terminal")
+        let warp = Origin(name: "Warp", kind: .terminal)
+        let minute: TimeInterval = 60, hour: TimeInterval = 3600, day: TimeInterval = 86_400
+
         let sample = [
-            PortEntry(port: 3000, pid: 62645, process: "node", hosts: ["*"], executable: "/opt/homebrew/bin/node", directory: "/code/portfolio"),
-            PortEntry(port: 5173, pid: 48112, process: "node", hosts: ["127.0.0.1", "::1"], executable: "/opt/homebrew/bin/node", directory: "/code/dashboard"),
-            PortEntry(port: 5432, pid: 1341, process: "postgres", hosts: ["127.0.0.1", "::1"], executable: "/opt/homebrew/bin/postgres", directory: "/opt/homebrew/var/postgresql@17"),
-            PortEntry(port: 6379, pid: 1334, process: "redis-server", hosts: ["127.0.0.1", "::1"], executable: "/opt/homebrew/bin/redis-server", directory: "/opt/homebrew/var/db/redis"),
-            PortEntry(port: 8000, pid: 51907, process: "python3.13", hosts: ["*"], executable: "/opt/homebrew/bin/python3.13", directory: "/code/api"),
-            PortEntry(port: 7000, pid: 1252, process: "ControlCenter", hosts: ["*"], executable: "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter", directory: "/"),
-            PortEntry(port: 59679, pid: 957, process: "rapportd", hosts: ["*"], executable: "/usr/libexec/rapportd", directory: "/"),
+            PortEntry(port: 3000, pid: 62645, process: "node", hosts: ["*"], executable: "/opt/homebrew/bin/node", directory: "/code/my-shop",
+                      origin: cursor, tty: "ttys004", uptime: 3 * hour),
+            PortEntry(port: 3001, pid: 62702, process: "node", hosts: ["*"], executable: "/opt/homebrew/bin/node", directory: "/code/my-shop",
+                      origin: cursor, tty: "ttys004", uptime: 3 * hour),
+            PortEntry(port: 5173, pid: 48112, process: "node", hosts: ["127.0.0.1", "::1"], executable: "/opt/homebrew/bin/node", directory: "/code/dashboard",
+                      origin: terminal, tty: "ttys001", uptime: 12 * minute),
+            PortEntry(port: 5432, pid: 1341, process: "postgres", hosts: ["127.0.0.1", "::1"], executable: "/opt/homebrew/bin/postgres", directory: "/opt/homebrew/var/postgresql@17",
+                      origin: .detached, uptime: 6 * day),
+            PortEntry(port: 8000, pid: 51907, process: "python3.13", hosts: ["*"], executable: "/opt/homebrew/bin/python3.13", directory: "/code/api",
+                      origin: warp, tty: "ttys007", uptime: 40 * minute),
+            PortEntry(port: 7000, pid: 1252, process: "ControlCenter", hosts: ["*"], executable: "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter", directory: "/",
+                      origin: .detached, uptime: 6 * day),
+            PortEntry(port: 59679, pid: 957, process: "rapportd", hosts: ["*"], executable: "/usr/libexec/rapportd", directory: "/",
+                      origin: .detached, uptime: 6 * day),
+        ]
+
+        // Awkward cases, to check that nothing breaks when names run long.
+        let ide = Origin(name: "IntelliJ IDEA", kind: .editor)
+        let code = "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)"
+        let crowded = [
+            PortEntry(port: 3000, pid: 62645, process: "next-server (v15.1.0)", hosts: ["*"], executable: "/opt/homebrew/bin/node",
+                      directory: "/code/acme-storefront-checkout-redesign-2026", origin: ide, tty: "ttys004", uptime: 26 * hour),
+            PortEntry(port: 24678, pid: 62645, process: "next-server (v15.1.0)", hosts: ["*"], executable: "/opt/homebrew/bin/node",
+                      directory: "/code/acme-storefront-checkout-redesign-2026", origin: ide, tty: "ttys004", uptime: 26 * hour),
+            PortEntry(port: 54321, pid: 9310, process: "postgres", hosts: ["*"], executable: "/opt/homebrew/bin/postgres",
+                      directory: "/code/acme-storefront-checkout-redesign-2026", origin: Origin(name: "tmux", kind: .multiplexer), uptime: 9 * day),
+            PortEntry(port: 5500, pid: 28256, process: "Code Helper (Plugin)", hosts: ["*"], executable: code,
+                      directory: "/code/a-folder-with-quite-a-long-name-indeed", origin: Origin(name: "VS Code", kind: .editor, isOwnApp: true), uptime: 2 * hour),
+            PortEntry(port: 8080, pid: 733, process: "java", hosts: ["*"], executable: "/usr/bin/java",
+                      directory: "/code/billing-service-migration", origin: ide, uptime: 20),
+            PortEntry(port: 9000, pid: 4410, process: "php-fpm", hosts: ["*"], executable: "/opt/homebrew/sbin/php-fpm", directory: "/code/blog"),
         ]
 
         let out = URL(fileURLWithPath: directory)
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
 
-        let shots: [(String, [PortEntry], Set<Int32>, Bool)] = [
-            ("open", sample, [], false),
-            ("stubborn", Array(sample.prefix(3)), [48112], false),
-            ("empty", Array(sample.suffix(2)), [], false),
+        // The last three are for checking the layout and are only written with --checks.
+        var shots: [(String, [PortEntry], Set<Int32>, Set<Int32>, Bool)] = [
+            ("open", sample, [], [], false),
+            ("stubborn", Array(sample[2...4]), [48112], [], false),
+            ("project", Array(sample.prefix(3)), [], [], false),
         ]
-        for (name, entries, stubborn, hint) in shots {
+        if checks {
+            shots += [
+                ("empty", Array(sample.suffix(2)), [], [], false),
+                ("stopping", Array(sample.prefix(3)), [62702], [62645], false),
+                ("crowded", crowded, [], [], true),
+            ]
+        }
+        for (name, entries, stubborn, stopping, hint) in shots {
             let model = PortsModel()
             model.showBackground = false
             model.entries = entries
             model.stubborn = stubborn
+            model.stopping = stopping
             model.loaded = true
 
             let menuBar: CGFloat = 32
-            let height = Metrics.height(rows: model.visible.count, hint: hint)
+            let height = Metrics.height(content: model.contentHeight, hint: hint)
             let view = PanelView(model: model, hint: hint, onMenu: {})
                 .environment(\.isSnapshot, true)
                 .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
