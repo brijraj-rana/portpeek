@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/BRIJRAJ-02/portpeek/actions/workflows/ci.yml"><img src="https://github.com/BRIJRAJ-02/portpeek/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/brijraj-rana/portpeek/actions/workflows/ci.yml"><img src="https://github.com/brijraj-rana/portpeek/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/macOS-14%2B-black" alt="macOS 14+">
   <img src="https://img.shields.io/badge/SwiftUI-native-black" alt="SwiftUI">
   <img src="https://img.shields.io/badge/license-MIT-black" alt="MIT">
@@ -45,7 +45,7 @@
 
 ### Download
 
-Get `Portpeek-x.y.z.dmg` from the [latest release](https://github.com/BRIJRAJ-02/portpeek/releases/latest), open it and drag Portpeek to Applications. It runs on Apple Silicon and Intel, macOS 14 or later.
+Get `Portpeek-x.y.z.dmg` from the [latest release](https://github.com/brijraj-rana/portpeek/releases/latest), open it and drag Portpeek to Applications. It runs on Apple Silicon and Intel, macOS 14 or later.
 
 The app is not notarized, so macOS blocks the first launch. Either allow it under System Settings → Privacy & Security → Open Anyway, or run:
 
@@ -58,7 +58,7 @@ xattr -dr com.apple.quarantine /Applications/Portpeek.app
 Requires Xcode 16 or later (for the Swift toolchain).
 
 ```bash
-git clone https://github.com/BRIJRAJ-02/portpeek.git
+git clone https://github.com/brijraj-rana/portpeek.git
 cd portpeek
 ./scripts/build-app.sh --install   # builds, copies Portpeek.app to /Applications, launches it, links the portpeek command
 ```
