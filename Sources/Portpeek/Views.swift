@@ -55,14 +55,46 @@ enum Metrics {
 
     static let maxList = CGFloat(maxRows) * row
 
-    /// What the list would measure with nothing cut off.
-    static func contentHeight(_ sections: [PortSection]) -> CGFloat {
-        sections.reduce(0) { total, section in
+    /// What the list would measure with nothing cut off. One row may be open, showing its details.
+    static func contentHeight(_ sections: [PortSection], expanded: PortEntry? = nil) -> CGFloat {
+        let rows = sections.reduce(0) { total, section in
             switch section {
             case .row: return total + row
             case .project(let group): return total + heading + CGFloat(group.entries.count) * row + groupGap * 2
             }
         }
+        return rows + (expanded.map { detailHeight($0.details) } ?? 0)
+    }
+
+    // An open row's details: a command line, a line of facts, a line of things to copy.
+    static let detailWidth = width - padding * 2
+    static let commandFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
+    static let commandLine: CGFloat = 14
+    static let commandLines = 3            // a longer command is cut short here; Copy command still has all of it
+    static let factsLine: CGFloat = 14
+    static let copyLine: CGFloat = 16
+    static let detailGap: CGFloat = 6
+    static let detailBottom: CGFloat = 12
+
+    /// How tall a command is when wrapped to the panel, measured the way it will be drawn.
+    static func commandHeight(_ text: String) -> CGFloat {
+        let style = NSMutableParagraphStyle()
+        style.minimumLineHeight = commandLine
+        style.maximumLineHeight = commandLine
+        style.lineBreakMode = .byWordWrapping
+        let box = (text as NSString).boundingRect(with: CGSize(width: detailWidth, height: .greatestFiniteMagnitude),
+                                                  options: [.usesLineFragmentOrigin],
+                                                  attributes: [.font: commandFont, .paragraphStyle: style])
+        let lines = max(1, min(commandLines, Int((box.height / commandLine).rounded())))
+        return CGFloat(lines) * commandLine
+    }
+
+    static func detailHeight(_ details: PortDetails) -> CGFloat {
+        var parts: [CGFloat] = []
+        if let headline = details.headline { parts.append(commandHeight(headline)) }
+        if details.facts != nil { parts.append(factsLine) }
+        if !details.copies.isEmpty { parts.append(copyLine) }
+        return parts.reduce(0, +) + CGFloat(max(0, parts.count - 1)) * detailGap + detailBottom
     }
 
     static func listHeight(content: CGFloat) -> CGFloat {
@@ -151,23 +183,74 @@ struct PortRow: View {
     let stopping: Bool
     let stubborn: Bool
     var grouped = false                    // under a project heading, which already names the folder
+    var expanded = false                   // showing its details underneath
     let onOpen: () -> Void
     let onStop: () -> Void
     var onOrigin: () -> Void = {}
     var onHover: (Bool) -> Void = { _ in }
+    var onToggle: () -> Void = {}
+    var onCopy: (String) -> Void = { _ in }
     @State private var hovering = false
     @Environment(\.isSnapshot) private var isSnapshot
 
     private var detail: String {
+        // A container's port is held by its runtime, whose pid says nothing about the container.
+        if let container = entry.container { return "\(container.image) · \(container.runtime.name)" }
         var parts: [String] = []
-        if !grouped, let project = entry.project { parts.append(project) }
-        if entry.appName != nil, entry.process != entry.displayName { parts.append(entry.process) }
+        if entry.runtime != nil {
+            parts.append("container")
+        } else {
+            if !grouped, let project = entry.project { parts.append(project) }
+            if entry.appName != nil, entry.process != entry.displayName { parts.append(entry.process) }
+        }
         parts.append("pid \(entry.pid)")
         return parts.joined(separator: " · ")
     }
 
+    /// What the red button says, or nil when there is nothing safe for it to do.
+    private var stopTitle: String? {
+        switch entry.stopAction {
+        case .signal: return stubborn ? "Force" : "Kill"
+        // Short, so a container's name has room. The row is named after the container, which says what stops.
+        case .container: return "Stop"
+        case .nothing: return nil
+        }
+    }
+
+    private var stopLabel: String {
+        switch entry.stopAction {
+        case .container(let container): return "Stop container \(container.name) on port \(entry.port)"
+        default: return "\(stubborn ? "Force quit" : "Quit") \(entry.displayName) on port \(entry.port)"
+        }
+    }
 
     var body: some View {
+        VStack(spacing: 0) {
+            summary
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onToggle)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint(expanded ? "Hides the details" : "Shows the command, uptime and memory")
+            if expanded {
+                RowDetails(details: entry.details, onCopy: onCopy)
+                    .padding(.horizontal, grouped ? Metrics.padding - Metrics.groupInset : Metrics.padding)
+            }
+        }
+        .background {
+            ZStack {
+                Color.white.opacity(hovering ? 0.07 : expanded ? 0.04 : 0)
+                if !isSnapshot {
+                    HoverSensor {
+                        hovering = $0
+                        onHover($0)
+                    }
+                }
+            }
+        }
+        .opacity(stopping ? 0.55 : 1)
+    }
+
+    private var summary: some View {
         HStack(spacing: 10) {
             Text(verbatim: "\(entry.port)")
                 .font(.system(size: 15, weight: .semibold, design: .rounded).monospacedDigit())
@@ -211,32 +294,104 @@ struct PortRow: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel("Open localhost \(entry.port) in the browser")
                 }
-                Button(action: onStop) {
-                    Text(stubborn ? "Force" : "Kill")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(hovering || stubborn ? Tone.danger : .white.opacity(0.6))
-                        .padding(.horizontal, 9)
-                        .frame(height: 22)
-                        .background(Capsule().fill(hovering || stubborn ? Tone.danger.opacity(0.18) : .white.opacity(0.1)))
+                if let stopTitle {
+                    Button(action: onStop) {
+                        Text(stopTitle)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(hovering || stubborn ? Tone.danger : .white.opacity(0.6))
+                            .lineLimit(1)
+                            .fixedSize()
+                            .padding(.horizontal, 9)
+                            .frame(height: 22)
+                            .background(Capsule().fill(hovering || stubborn ? Tone.danger.opacity(0.18) : .white.opacity(0.1)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(stopLabel)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(stubborn ? "Force quit" : "Quit") \(entry.displayName) on port \(entry.port)")
             }
         }
         .padding(.horizontal, grouped ? Metrics.padding - Metrics.groupInset : Metrics.padding)
         .frame(height: Metrics.row)
-        .background {
-            ZStack {
-                Color.white.opacity(hovering ? 0.07 : 0)
-                if !isSnapshot {
-                    HoverSensor {
-                        hovering = $0
-                        onHover($0)
+    }
+}
+
+/// Under an open row: the command line, how long it has been up and how much memory it holds, and things to copy.
+struct RowDetails: View {
+    let details: PortDetails
+    let onCopy: (String) -> Void
+    @State private var copied: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Metrics.detailGap) {
+            if let headline = details.headline {
+                Text(headline)
+                    .font(Font(Metrics.commandFont))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(Metrics.commandLines)
+                    .truncationMode(.tail)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: Metrics.detailWidth, height: Metrics.commandHeight(headline), alignment: .topLeading)
+            }
+            if let facts = details.facts {
+                Text(facts)
+                    .font(.system(size: 10.5, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.45))
+                    .lineLimit(1)
+                    .frame(height: Metrics.factsLine)
+            }
+            if !details.copies.isEmpty {
+                HStack(spacing: 12) {
+                    Text("Copy")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .accessibilityHidden(true)
+                    ForEach(details.copies) { copy in
+                        CopyButton(word: copy.word, title: copy.title, done: copied == copy.id) {
+                            onCopy(copy.text)
+                            copied = copy.id
+                            // Long enough to read, then back to what it does.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                                if copied == copy.id { copied = nil }
+                            }
+                        }
                     }
                 }
+                .frame(height: Metrics.copyLine)
             }
         }
-        .opacity(stopping ? 0.55 : 1)
+        .frame(width: Metrics.detailWidth, height: Metrics.detailHeight(details) - Metrics.detailBottom, alignment: .topLeading)
+        .padding(.bottom, Metrics.detailBottom)
+    }
+}
+
+/// Words that copy something, in the manner of the footer: quiet until the pointer is on them.
+struct CopyButton: View {
+    let word: String
+    let title: String                      // the whole of it, for VoiceOver
+    let done: Bool
+    let action: () -> Void
+    @State private var hovering = false
+    @Environment(\.isSnapshot) private var isSnapshot
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button(action: action) {
+            // The word keeps its place so the line does not shift when it says Copied.
+            Text(word)
+                .opacity(done ? 0 : 1)
+                .overlay(alignment: .leading) { Text("Copied").fixedSize().opacity(done ? 1 : 0) }
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(hovering || done ? 0.95 : 0.6))
+                .lineLimit(1)
+                .fixedSize()
+                .frame(height: Metrics.copyLine)
+                .contentShape(Rectangle())
+                .background { if !isSnapshot { HoverSensor { hovering = $0 } } }
+        }
+        .buttonStyle(.plain)
+        .animation(Motion.quick(reduceMotion), value: hovering)
+        .animation(Motion.quick(reduceMotion), value: done)
+        .accessibilityLabel(title)
     }
 }
 
@@ -326,7 +481,7 @@ struct PanelView: View {
     var body: some View {
         let rows = model.visible
         let sections = Projects.sections(rows)
-        let content = Metrics.contentHeight(sections)
+        let content = Metrics.contentHeight(sections, expanded: rows.first { $0.id == model.expanded })
         VStack(spacing: 0) {
             header(count: rows.count)
             hairline
@@ -411,13 +566,16 @@ struct PanelView: View {
 
     private func row(_ entry: PortEntry, grouped: Bool) -> some View {
         PortRow(entry: entry,
-                stopping: model.stopping.contains(entry.pid),
-                stubborn: model.stubborn.contains(entry.pid),
+                stopping: model.isStopping(entry),
+                stubborn: model.stubborn.contains(entry.pid) && entry.stopAction == .signal,
                 grouped: grouped,
+                expanded: model.expanded == entry.id,
                 onOpen: { model.open(entry) },
                 onStop: { model.stop(entry) },
                 onOrigin: { model.showOrigin(of: entry) },
-                onHover: { model.hover(entry, $0) })
+                onHover: { model.hover(entry, $0) },
+                onToggle: { model.toggle(entry) },
+                onCopy: { model.copy($0) })
     }
 
     private var footer: some View {
@@ -470,6 +628,7 @@ struct RootView: View {
             .frame(width: Metrics.windowSize.width, height: Metrics.windowSize.height, alignment: state.corner.alignment)
             .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.3, dampingFraction: 0.84), value: state.open)
             .animation(.easeOut(duration: 0.18), value: model.visible.map(\.id))
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: model.expanded)
             .ignoresSafeArea()
     }
 }

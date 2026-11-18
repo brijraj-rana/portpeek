@@ -9,13 +9,20 @@ public struct ProcessRecord: Equatable, Sendable {
     /// Seconds since the process started.
     public var elapsed: TimeInterval?
     public var executable: String
+    /// The whole command line, as `ps` prints it. A few servers rewrite theirs ("next-server (v15.1.0)").
+    public var command: String?
+    /// Resident memory, in bytes.
+    public var memory: Int64?
 
-    public init(pid: Int32, parent: Int32, tty: String? = nil, elapsed: TimeInterval? = nil, executable: String) {
+    public init(pid: Int32, parent: Int32, tty: String? = nil, elapsed: TimeInterval? = nil, executable: String,
+                command: String? = nil, memory: Int64? = nil) {
         self.pid = pid
         self.parent = parent
         self.tty = tty
         self.elapsed = elapsed
         self.executable = executable
+        self.command = command
+        self.memory = memory
     }
 }
 
@@ -83,6 +90,42 @@ public enum ProcessTable {
                                         executable: path)
         }
         return result
+    }
+
+    /// Reads `ps -axww -o pid=,rss=,args=` output and adds the command line and memory to the records it already has.
+    /// `rss` is in kilobytes. The command comes last because it is full of spaces.
+    public static func addDetails(_ text: String, to table: [Int32: ProcessRecord]) -> [Int32: ProcessRecord] {
+        var table = table
+        for line in text.split(whereSeparator: \.isNewline) {
+            let fields = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+            guard fields.count == 3, let pid = Int32(fields[0]), let kilobytes = Int64(fields[1]), table[pid] != nil else { continue }
+            let command = fields[2].trimmingCharacters(in: .whitespaces)
+            table[pid]?.command = command.isEmpty ? nil : command
+            table[pid]?.memory = kilobytes > 0 ? kilobytes * 1024 : nil
+        }
+        return table
+    }
+
+    /// The process to run again to get a server back: the outermost command above it that somebody typed or an app started.
+    ///
+    /// The process holding the port is often not that. `npm run dev` starts `sh -c`, which starts `node`, which may then
+    /// rename itself. So this walks up until it meets an interactive shell, an app, or launchd, and returns the last
+    /// thing below that which is not a shell wrapper. Nil when the chain breaks or nothing has a command line.
+    public static func launcher(of pid: Int32, in table: [Int32: ProcessRecord]) -> ProcessRecord? {
+        var current = pid
+        var seen: Set<Int32> = []
+        var found: ProcessRecord?
+        while seen.insert(current).inserted, seen.count <= 64, current > 1 {
+            guard let record = table[current] else { return nil }
+            if current != pid, Host.match(record.executable) != nil { break }
+            if Shells.isShell(record.executable) {
+                if Shells.isInteractive(record.command) { break }
+            } else if record.command != nil {
+                found = record
+            }
+            current = record.parent
+        }
+        return found
     }
 
     /// Reads the `etime` column, `[[dd-]hh:]mm:ss`, into seconds.
@@ -171,9 +214,12 @@ public enum Host {
     }
 
     /// The outermost app bundle an executable lives in.
+    /// An app tucked inside a framework is not one: Homebrew's Python runs from Python.framework/…/Python.app,
+    /// and a server written in Python is no more an app than one written in Node.
     static func bundleName(_ executable: String) -> String? {
-        for component in executable.split(separator: "/") where component.hasSuffix(".app") && component.count > 4 {
-            return String(component.dropLast(4))
+        for component in executable.split(separator: "/") {
+            if component.hasSuffix(".framework") { return nil }
+            if component.hasSuffix(".app") && component.count > 4 { return String(component.dropLast(4)) }
         }
         return nil
     }
@@ -258,13 +304,36 @@ public enum TerminalFocus {
     }
 }
 
+/// Telling a shell somebody is typing into from one that is only running a script.
+enum Shells {
+    static let names: Set<String> = ["sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "xonsh", "pwsh"]
+
+    static func isShell(_ executable: String) -> Bool {
+        var name = (executable as NSString).lastPathComponent.lowercased()
+        if name.hasPrefix("-") { name.removeFirst() }      // a login shell shows up as "-zsh"
+        return names.contains(name)
+    }
+
+    /// True for a bare shell ("-zsh", "/bin/zsh -il"): one with nothing to run but what is typed into it.
+    static func isInteractive(_ command: String?) -> Bool {
+        guard let command else { return true }
+        let arguments = command.split(separator: " ").dropFirst()
+        return arguments.allSatisfy { ["-l", "-i", "-il", "-li", "--login", "--interactive"].contains($0) }
+    }
+}
+
 public enum Uptime {
     /// "Up 3 hours". Coarse on purpose: nobody needs the seconds.
     public static func phrase(_ seconds: TimeInterval?) -> String? {
+        duration(seconds).map { "Up " + $0 }
+    }
+
+    /// "3 hours", for a sentence that supplies its own verb.
+    public static func duration(_ seconds: TimeInterval?) -> String? {
         guard let seconds, seconds >= 0 else { return nil }
-        func count(_ value: Int, _ unit: String) -> String { "Up \(value) \(unit)\(value == 1 ? "" : "s")" }
+        func count(_ value: Int, _ unit: String) -> String { "\(value) \(unit)\(value == 1 ? "" : "s")" }
         let minutes = Int(seconds) / 60
-        if minutes < 1 { return "Up less than a minute" }
+        if minutes < 1 { return "less than a minute" }
         if minutes < 60 { return count(minutes, "minute") }
         let hours = minutes / 60
         if hours < 48 { return count(hours, "hour") }

@@ -38,9 +38,10 @@ public enum PortSection: Identifiable, Equatable, Sendable {
 public enum Projects {
     /// Only something you started in a project folder can belong to a project.
     /// System services, apps and their helpers never do, wherever they happen to be running:
-    /// the folder an app works in is its own business, not a project.
+    /// the folder an app works in is its own business, not a project. Nor does a container runtime,
+    /// so Stop all can never reach one.
     public static func belongsToProject(_ entry: PortEntry) -> Bool {
-        entry.project != nil && !entry.isSystem && !entry.isBackground && entry.appName == nil
+        entry.runtime == nil && entry.project != nil && !entry.isSystem && !entry.isBackground && entry.appName == nil
     }
 
     /// Groups entries that share a folder when there are at least two of them, keeping the order they came in.

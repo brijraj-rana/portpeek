@@ -11,6 +11,8 @@ final class PortsModel: ObservableObject {
     @Published var loaded = false
     @Published var stopping: Set<Int32> = []      // asked to quit, not gone yet
     @Published var stubborn: Set<Int32> = []      // ignored a polite request; the next press forces it
+    @Published var stoppingContainers: Set<String> = []   // container ids being stopped by their runtime
+    @Published var expanded: String?              // the one row showing its details, by entry id
     @Published var showBackground: Bool {
         didSet { UserDefaults.standard.set(showBackground, forKey: "showBackground") }
     }
@@ -30,9 +32,23 @@ final class PortsModel: ObservableObject {
         showBackground ? entries : entries.filter { !$0.isBackground }
     }
 
-    /// How tall the list wants to be, projects and their headings included.
+    /// How tall the list wants to be, projects, their headings and an open row's details included.
     var contentHeight: CGFloat {
-        Metrics.contentHeight(Projects.sections(visible))
+        let rows = visible
+        return Metrics.contentHeight(Projects.sections(rows), expanded: rows.first { $0.id == expanded })
+    }
+
+    /// Opens a row's details, or closes them if they are already open. One row at a time.
+    func toggle(_ entry: PortEntry) {
+        expanded = expanded == entry.id ? nil : entry.id
+    }
+
+    func isStopping(_ entry: PortEntry) -> Bool {
+        switch entry.stopAction {
+        case .signal: return stopping.contains(entry.pid)
+        case .container(let container): return stoppingContainers.contains(container.id)
+        case .nothing: return false
+        }
     }
 
     var backgroundCount: Int {
@@ -60,6 +76,7 @@ final class PortsModel: ObservableObject {
         let alive = Set(found.map(\.pid))
         stopping.formIntersection(alive)
         stubborn.formIntersection(alive)
+        if let expanded, !found.contains(where: { $0.id == expanded }) { self.expanded = nil }
         if rescan {
             rescan = false
             refresh()
@@ -113,7 +130,29 @@ final class PortsModel: ObservableObject {
     }
 
     func stop(_ entry: PortEntry) {
-        signal(entry.pid, force: stubborn.contains(entry.pid))
+        switch entry.stopAction {
+        case .signal:
+            signal(entry.pid, force: stubborn.contains(entry.pid))
+        case .container(let container):
+            stop(container)
+        case .nothing:
+            // The process is a container runtime. Signalling it would take every container down.
+            break
+        }
+    }
+
+    /// Asks the runtime to stop one container. That can take ten seconds, so it happens off the main thread.
+    private func stop(_ container: ContainerInfo) {
+        guard stoppingContainers.insert(container.id).inserted else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            Containers.stop(container)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.stoppingContainers.remove(container.id)
+                    self.refresh()
+                }
+            }
+        }
     }
 
     /// Asks every process in a project to quit. Any that ignore it get a Force button on their own row, as usual.
@@ -311,7 +350,10 @@ final class CornerController: NSObject {
         guard state.open != open else { return }
         state.open = open
         pointerInside = open
-        if open { model.refresh() }
+        if open {
+            model.expanded = nil               // it always opens as the plain list
+            model.refresh()
+        }
 
         pollTimer?.invalidate()
         pollTimer = nil
